@@ -1,0 +1,622 @@
+/**
+ * Fågelåret i Åstorp — Artkalender
+ * Interactive species guide with monthly navigation,
+ * rarity color coding, and checklist integration.
+ */
+(function () {
+    'use strict';
+
+    function publicStatsReady(meta) {
+        return !!meta && meta.dataProviderId === 1 && meta.municipalityId === '1277' &&
+            meta.complete === true && meta.sensitiveObservations === false &&
+            meta.taxonomyPolicy === 'species-rank-only-v1' &&
+            typeof meta.recordsSha256 === 'string' && /^[a-f0-9]{64}$/.test(meta.recordsSha256) &&
+            Number.isSafeInteger(meta.recordCount) && meta.recordCount >= 0 &&
+            /^\d{4}-\d{2}-\d{2}$/.test(meta.fromDay) && /^\d{4}-\d{2}-\d{2}$/.test(meta.toDay) &&
+            meta.fromDay <= meta.toDay && typeof meta.retrievedAt === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(meta.retrievedAt) &&
+            Number.isFinite(Date.parse(meta.retrievedAt)) && Date.parse(meta.retrievedAt) <= Date.now();
+    }
+
+    function escapeHtml(value) {
+        return String(value == null ? '' : value).replace(/[&<>"']/g, character => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[character]));
+    }
+
+    // --- State ---
+    let speciesData = [];
+    let statisticsReady = false;
+    let checklistData = [];
+    let currentMonth = new Date().getMonth(); // 0-indexed
+    let currentView = 'year';
+    let currentFilter = 'all';
+    let currentSort = 'likely';
+    let expandedCard = null;
+
+    const MONTH_NAMES = [
+        'Januari', 'Februari', 'Mars', 'April', 'Maj', 'Juni',
+        'Juli', 'Augusti', 'September', 'Oktober', 'November', 'December'
+    ];
+
+    const CATEGORY_LABELS = {
+        abundant: 'Förväntad',
+        regular: 'Möjlig',
+        uncommon: 'Ovanlig',
+        rare: 'Raritet',
+        new: 'Endast i min lista'
+    };
+
+    const CATEGORY_ICONS = {
+        abundant: '',
+        regular: '',
+        uncommon: '◆',
+        rare: '⭐',
+        new: '🆕'
+    };
+
+    const TARGET = 150;
+
+    // --- Init ---
+    async function init() {
+        try {
+            const baseURL = window.siteBaseURL || '/birds_Astorp-preview/';
+            const [guideRes, checklistRes] = await Promise.all([
+                fetch(baseURL + 'data/species-guide.json'),
+                fetch(baseURL + 'data/checklist-2026.json')
+            ]);
+            const guideJson = await guideRes.json();
+            const checklistJson = await checklistRes.json();
+
+            const provenance = guideJson.provenance || {};
+            const sourceReady = publicStatsReady(provenance) && Array.isArray(guideJson.species) && guideJson.species.every(sp =>
+                Number.isSafeInteger(sp.taxonId) && sp.taxonId > 0 && typeof sp.name === 'string' && typeof sp.latin === 'string' &&
+                ['abundant', 'regular', 'uncommon', 'rare'].includes(sp.category) && Number.isSafeInteger(sp.total) && sp.total >= 0 &&
+                Array.isArray(sp.months) && sp.months.length === 12 && sp.months.every(n => Number.isSafeInteger(n) && n >= 0) &&
+                sp.months.reduce((a, b) => a + b, 0) === sp.total);
+            statisticsReady = sourceReady;
+            speciesData = sourceReady ? (guideJson.species || []) : [];
+            checklistData = checklistJson.observations || [];
+
+            // Set export date in footer
+            const footerDate = document.querySelector('.artguide-footer__date');
+            if (footerDate) {
+                footerDate.textContent = sourceReady ? `Exportdatum: ${guideJson.exportDate || guideJson.generated}. Personliga kryss räknas separat.` : 'Äldre statistikunderlag behöver källkontrolleras. Endast personliga kryss visas.';
+            }
+
+            matchChecklist();
+            setupEventListeners();
+
+            // Check URL params for pre-selected filter (e.g. ?filter=checked)
+            const urlParams = new URLSearchParams(window.location.search);
+            const filterParam = urlParams.get('filter');
+            if (filterParam) {
+                const filterBtn = document.querySelector(`.artguide-filter[data-filter="${filterParam}"]`);
+                if (filterBtn) {
+                    document.querySelectorAll('.artguide-filter').forEach(b => b.classList.remove('artguide-filter--active'));
+                    filterBtn.classList.add('artguide-filter--active');
+                    currentFilter = filterParam;
+                }
+            }
+
+            // Check URL params for pre-selected view (e.g. ?view=month)
+            const viewParam = urlParams.get('view');
+            if (viewParam === 'month') {
+                currentView = 'month';
+                document.querySelectorAll('.artguide-view-toggle__btn').forEach(b => {
+                    b.classList.remove('artguide-view-toggle__btn--active');
+                    b.setAttribute('aria-selected', 'false');
+                });
+                const monthBtn = document.querySelector('.artguide-view-toggle__btn[data-view="month"]');
+                if (monthBtn) {
+                    monthBtn.classList.add('artguide-view-toggle__btn--active');
+                    monthBtn.setAttribute('aria-selected', 'true');
+                }
+            }
+
+            // Hide the month nav if we are in year view (which is the default)
+            const monthNav = document.querySelector('.artguide-months');
+            if (monthNav) monthNav.style.display = currentView === 'year' ? 'none' : '';
+
+            renderProgressBar();
+            setActiveMonth(currentMonth);
+            if (currentView === 'year') {
+                renderYearView();
+            } else {
+                renderMonthView(currentMonth);
+            }
+        } catch (err) {
+            console.error('Artguide: Failed to load data', err);
+            const container = document.getElementById('artguide-species');
+            if (container) {
+                container.innerHTML = '<p style="text-align:center;padding:2rem;color:#666;">Kunde inte ladda artdata.</p>';
+            }
+        }
+    }
+
+    // --- Checklist matching ---
+    function matchChecklist() {
+        const checkMap = new Map();
+        for (const obs of checklistData) {
+            const key = obs.species.toLowerCase();
+            if (!checkMap.has(key)) {
+                checkMap.set(key, {
+                    species: obs.species,
+                    latin: obs.latin,
+                    date: obs.date,
+                    location: obs.location,
+                    personalDates: [obs.date]
+                });
+            } else {
+                checkMap.get(key).personalDates.push(obs.date);
+            }
+        }
+        
+        const guideNames = new Set(speciesData.map(s => s.name.toLowerCase()));
+        
+        // Lägg till nya arter från årets lista som inte finns i historiken
+        for (const [key, obs] of checkMap) {
+            if (!guideNames.has(key)) {
+                speciesData.push({
+                    name: obs.species,
+                    latin: obs.latin,
+                    total: 0,
+                    category: 'new',
+                    personalOnly: true,
+                    months: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    checked: false // Sätts i nästa loop
+                });
+            }
+        }
+
+        for (const sp of speciesData) {
+            const key = sp.name.toLowerCase();
+            const match = checkMap.get(key);
+            if (match) {
+                sp.checked = true;
+                sp.checkDate = match.date;
+                sp.checkLocation = match.location;
+                
+                // Personal checkmarks annotate the UI, never public statistics.
+                sp.personalDates = match.personalDates.slice();
+            } else {
+                sp.checked = false;
+                delete sp.checkDate;
+                delete sp.checkLocation;
+                delete sp.personalDates;
+            }
+        }
+    }
+
+    // --- Event listeners ---
+    function setupEventListeners() {
+        // Month buttons
+        document.querySelectorAll('.artguide-months__btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const month = parseInt(btn.dataset.month);
+                setActiveMonth(month);
+                if (currentView === 'month') {
+                    renderMonthView(month);
+                }
+            });
+        });
+
+        // View toggle
+        document.querySelectorAll('.artguide-view-toggle__btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.artguide-view-toggle__btn').forEach(b => {
+                    b.classList.remove('artguide-view-toggle__btn--active');
+                    b.setAttribute('aria-selected', 'false');
+                });
+                btn.classList.add('artguide-view-toggle__btn--active');
+                btn.setAttribute('aria-selected', 'true');
+                currentView = btn.dataset.view;
+
+                // Hide month nav in year view
+                const monthNav = document.querySelector('.artguide-months');
+                if (monthNav) monthNav.style.display = currentView === 'year' ? 'none' : '';
+
+                if (currentView === 'month') {
+                    renderMonthView(currentMonth);
+                } else {
+                    renderYearView();
+                }
+            });
+        });
+
+        // Filters
+        document.querySelectorAll('.artguide-filter').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.artguide-filter').forEach(b => b.classList.remove('artguide-filter--active'));
+                btn.classList.add('artguide-filter--active');
+                currentFilter = btn.dataset.filter;
+                if (currentView === 'month') {
+                    renderMonthView(currentMonth);
+                } else {
+                    renderYearView();
+                }
+            });
+        });
+
+        // Sort toggle
+        document.querySelectorAll('.artguide-sort__btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.artguide-sort__btn').forEach(b => b.classList.remove('artguide-sort__btn--active'));
+                btn.classList.add('artguide-sort__btn--active');
+                currentSort = btn.dataset.sort;
+                if (currentView === 'month') {
+                    renderMonthView(currentMonth);
+                } else {
+                    renderYearView();
+                }
+            });
+        });
+    }
+
+    // --- Rendering ---
+    function setActiveMonth(month) {
+        currentMonth = month;
+        const now = new Date().getMonth();
+        document.querySelectorAll('.artguide-months__btn').forEach(btn => {
+            const m = parseInt(btn.dataset.month);
+            btn.classList.toggle('artguide-months__btn--active', m === month);
+            btn.classList.toggle('artguide-months__btn--past', m < now && m !== month);
+        });
+    }
+
+    function renderProgressBar() {
+        const checked = speciesData.filter(s => s.checked).length;
+        const pct = Math.min((checked / TARGET) * 100, 100);
+        const bar = document.querySelector('.artguide-progress');
+        const fill = document.querySelector('.artguide-progress__fill');
+        const countEl = document.querySelector('.artguide-progress__count');
+        const latestEl = document.querySelector('.artguide-progress__latest');
+
+        if (bar) bar.setAttribute('aria-valuenow', checked);
+        if (fill) {
+            fill.style.width = '0%';
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    fill.style.width = pct + '%';
+                    // 5-stegs crescendo-ramp: amber → guld → lime → grön → smaragd
+                    var hue, sat, light;
+                    if (pct <= 30) {
+                        var t = pct / 30;
+                        hue = 35 + t * 10; sat = 85; light = 55;
+                    } else if (pct <= 60) {
+                        var t = (pct - 30) / 30;
+                        hue = 45 + t * 20; sat = 85 + t * 5; light = 55 - t * 5;
+                    } else if (pct <= 85) {
+                        var t = (pct - 60) / 25;
+                        hue = 65 + t * 35; sat = 90 - t * 10; light = 50 - t * 6;
+                    } else {
+                        var t = Math.min((pct - 85) / 15, 1);
+                        hue = 100 + t * 40; sat = 80; light = 44 - t * 6;
+                    }
+                    fill.style.backgroundColor = 'hsl(' + hue + ', ' + sat + '%, ' + light + '%)';
+                });
+            });
+        }
+        if (countEl) countEl.textContent = `${checked}/${TARGET} arter`;
+
+        // Find latest check — show in homepage style
+        if (latestEl) {
+            const checkedSpecies = speciesData.filter(s => s.checked && s.checkDate);
+            checkedSpecies.sort((a, b) => b.checkDate.localeCompare(a.checkDate));
+            if (checkedSpecies.length > 0) {
+                const latest = checkedSpecies[0];
+                latestEl.innerHTML = `<span style="color: var(--color-text-muted)">Senast kryssad:</span> <strong style="color: var(--color-primary)">${escapeHtml(latest.name)}</strong> <span style="color: var(--color-text-muted); font-size: var(--text-xs)">(${escapeHtml(latest.checkLocation || '')}, ${formatDate(latest.checkDate)})</span>`;
+            }
+        }
+    }
+
+    function updateLegendCounts(viewSpecies, displayedCount) {
+        // viewSpecies = all species in the current view context (month or year),
+        // BEFORE any category/checked filter. This ensures legend always shows
+        // "checked / total in category" against the full pool.
+        const categories = ['abundant', 'regular', 'uncommon', 'rare', 'new'];
+        let totalChecked = 0, totalAll = 0;
+        categories.forEach(cat => {
+            const el = document.getElementById('legend-count-' + cat);
+            if (!el) return;
+            const inCat = viewSpecies.filter(s => s.category === cat);
+            const checked = inCat.filter(s => s.checked).length;
+            el.textContent = `${checked}/${inCat.length}`;
+            totalChecked += checked;
+            totalAll += inCat.length;
+        });
+        const yearChecked = speciesData.filter(s => s.checked).length;
+        const totalEl = document.getElementById('legend-count-total');
+        if (totalEl) totalEl.textContent = `Årstotal: ${yearChecked}/${TARGET} · Visade: ${displayedCount}/${totalAll}`;
+    }
+
+    function sortSpecies(species, month) {
+        if (currentSort === 'taxonomy') return species;
+        // Sort by observation count in given month (descending), fallback to total
+        return [...species].sort((a, b) => {
+            const aVal = month !== undefined ? a.months[month] : a.total;
+            const bVal = month !== undefined ? b.months[month] : b.total;
+            return bVal - aVal || b.total - a.total;
+        });
+    }
+
+    function sortChronological(species) {
+        return [...species].sort((a, b) => {
+            // Checked species first, sorted by date (earliest first)
+            if (a.checked && b.checked) {
+                return (a.checkDate || '').localeCompare(b.checkDate || '');
+            }
+            if (a.checked) return -1;
+            if (b.checked) return 1;
+            // Unchecked: taxonomic order
+            return 0;
+        });
+    }
+
+    function filterSpecies(species) {
+        switch (currentFilter) {
+            case 'abundant':
+            case 'regular':
+            case 'uncommon':
+            case 'rare':
+            case 'new':
+                return species.filter(s => s.category === currentFilter);
+            case 'checked':
+                return species.filter(s => s.checked);
+            case 'missing':
+                return species.filter(s => !s.checked);
+            default:
+                return species;
+        }
+    }
+
+    function renderMonthView(month) {
+        const container = document.getElementById('artguide-species');
+        const heading = document.querySelector('.artguide-month-heading__title');
+        const subtitle = document.querySelector('.artguide-month-heading__subtitle');
+
+        if (!container) return;
+
+        // Show month heading
+        const monthHeading = document.querySelector('.artguide-month-heading');
+        if (monthHeading) monthHeading.style.display = '';
+
+        // All species in this month (before category/checked filter)
+        const allMonthSpecies = speciesData.filter(sp => sp.months[month] > 0);
+
+        let monthSpecies = filterSpecies(allMonthSpecies);
+        if (currentSort === 'chronological') {
+            monthSpecies = sortChronological(monthSpecies);
+        } else {
+            monthSpecies = sortSpecies(monthSpecies, month);
+        }
+
+        const yearChecked = speciesData.filter(s => s.checked).length;
+
+        if (heading) heading.textContent = MONTH_NAMES[month];
+        if (subtitle) subtitle.textContent = '';
+
+        // Description text
+        const descEl = document.getElementById('artguide-description');
+        if (descEl) {
+            const totalInMonth = allMonthSpecies.length;
+            const totalCheckedInMonth = allMonthSpecies.filter(sp => sp.checked).length;
+            const monthName = MONTH_NAMES[month].toLowerCase();
+            let desc = statisticsReady ? `${yearChecked} av ${TARGET} arter har kryssats under 2026. I ${monthName} finns ${totalInMonth} arter rapporterade i det dokumenterade källunderlaget, och ${totalCheckedInMonth} av dessa är kryssade.` : 'Kommunens månadsstatistik saknas eller behöver källkontrolleras. Personliga kryss hålls separat.';
+            if (statisticsReady && currentFilter && currentFilter !== 'all' && monthSpecies.length !== totalInMonth) {
+                desc += ` Visar just nu: ${monthSpecies.length} arter.`;
+            }
+            descEl.textContent = desc;
+            descEl.style.display = '';
+        }
+
+        // Render cards
+        container.className = 'artguide-species artguide-species--cards';
+        container.innerHTML = monthSpecies.map(sp => renderCard(sp, month)).join('');
+        updateLegendCounts(allMonthSpecies, monthSpecies.length);
+
+        // Add click handlers for expansion
+        container.querySelectorAll('.artguide-card').forEach(card => {
+            card.addEventListener('click', () => toggleCardExpansion(card));
+            card.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    toggleCardExpansion(card);
+                }
+            });
+        });
+    }
+
+    function renderCard(sp, activeMonth) {
+        const icon = CATEGORY_ICONS[sp.category] || '';
+        const label = CATEGORY_LABELS[sp.category] || '';
+        const checkedClass = sp.checked ? ' artguide-card--checked' : '';
+        const checkMark = sp.checked ? ' <span class="artguide-card__check" aria-label="Kryssad">✓</span>' : '';
+
+        const sparkline = sp.personalOnly ? '' : renderSparkline(sp.months, activeMonth, sp.category);
+
+        // Show contextual count based on sort mode
+        let countText;
+        if (sp.personalOnly) {
+            countText = 'Saknas i statistikunderlaget';
+        } else if (currentSort === 'chronological' && sp.checked) {
+            countText = `Kryssad ${formatDate(sp.checkDate)}`;
+        } else if (currentSort === 'likely' && activeMonth !== undefined) {
+            const monthCount = sp.months[activeMonth];
+            countText = `${monthCount} i ${MONTH_NAMES[activeMonth].toLowerCase()} · ${sp.total} totalt`;
+        } else {
+            countText = `${sp.total} rapp. totalt`;
+        }
+
+        const ariaLabel = `${sp.name}: ${label}, ${sp.personalOnly ? 'statistik saknas' : sp.total + ' rapporter'}${sp.checked ? ', kryssad ' + sp.checkDate : ''}`;
+
+        return `
+        <div class="artguide-card artguide-card--${sp.category}${checkedClass}"
+             tabindex="0" role="button" aria-label="${escapeHtml(ariaLabel)}"
+             data-species="${escapeHtml(sp.name)}">
+            <div class="artguide-card__header">
+                <div class="artguide-card__names">
+                    <span class="artguide-card__name">${escapeHtml(sp.name)}${checkMark} ${icon}</span>
+                    <span class="artguide-card__latin">${escapeHtml(sp.latin)}</span>
+                </div>
+            </div>
+            <div class="artguide-card__meta">
+                <span class="artguide-card__category">${label}</span>
+                <span class="artguide-card__total">${countText}</span>
+            </div>
+            <div class="artguide-card__sparkline">${sparkline}</div>
+            <div class="artguide-card__details" style="display:none;">
+                ${renderDetails(sp)}
+            </div>
+        </div>`;
+    }
+
+    function renderSparkline(months, activeMonth, category) {
+        const max = Math.max(...months, 1);
+        const barWidth = 6;
+        const gap = 2;
+        const height = 24;
+        const totalWidth = 12 * (barWidth + gap) - gap;
+
+        let bars = '';
+        for (let i = 0; i < 12; i++) {
+            const val = months[i];
+            const barHeight = Math.max((val / max) * height, val > 0 ? 2 : 0);
+            const y = height - barHeight;
+            const isActive = i === activeMonth;
+            const cls = isActive ? 'sparkline-bar sparkline-bar--active' : 'sparkline-bar';
+            const x = i * (barWidth + gap);
+            bars += `<rect class="${cls}" x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="1"/>`;
+        }
+
+        return `<svg class="artguide-sparkline artguide-sparkline--${category}" width="${totalWidth}" height="${height}" viewBox="0 0 ${totalWidth} ${height}" aria-hidden="true">${bars}</svg>`;
+    }
+
+    function renderDetails(sp) {
+        let html = '<div class="artguide-detail">';
+
+        // Monthly bar chart
+        if (!sp.personalOnly) {
+        html += '<div class="artguide-detail__chart">';
+        const max = Math.max(...sp.months, 1);
+        for (let i = 0; i < 12; i++) {
+            const val = sp.months[i];
+            const pct = (val / max) * 100;
+            const label = MONTH_NAMES[i].substring(0, 3);
+            html += `<div class="artguide-detail__bar-col">
+                <div class="artguide-detail__bar-wrap">
+                    <div class="artguide-detail__bar" style="height:${pct}%">${val > 0 ? val : ''}</div>
+                </div>
+                <span class="artguide-detail__bar-label">${label}</span>
+            </div>`;
+        }
+        html += '</div>';
+
+        }
+        // Info
+        html += `<div class="artguide-detail__info">`;
+        html += sp.personalOnly ? '<p>Saknas i statistikunderlaget. Det personliga krysset räknas inte som en Artportalen-rapport.</p>' : `<p><strong>Totalt:</strong> ${sp.total} rapporter i Åstorps kommun</p>`;
+        if (sp.checked) {
+            html += `<p><strong>Kryssad:</strong> ${formatDate(sp.checkDate)}`;
+            if (sp.checkLocation) html += `, ${escapeHtml(sp.checkLocation)}`;
+            html += `</p>`;
+        }
+        html += '</div>';
+
+        html += '</div>';
+        return html;
+    }
+
+    function toggleCardExpansion(card) {
+        const details = card.querySelector('.artguide-card__details');
+        const sparkline = card.querySelector('.artguide-card__sparkline');
+        if (!details) return;
+
+        const isExpanded = details.style.display !== 'none';
+        // Close any other expanded card
+        document.querySelectorAll('.artguide-card__details').forEach(d => d.style.display = 'none');
+        document.querySelectorAll('.artguide-card__sparkline').forEach(s => s.style.display = '');
+        document.querySelectorAll('.artguide-card').forEach(c => c.classList.remove('artguide-card--expanded'));
+
+        if (!isExpanded) {
+            details.style.display = '';
+            if (sparkline) sparkline.style.display = 'none';
+            card.classList.add('artguide-card--expanded');
+        }
+    }
+
+    // --- Year/heatmap view ---
+    function renderYearView() {
+        const container = document.getElementById('artguide-species');
+        if (!container) return;
+
+        // Show year heading
+        const monthHeading = document.querySelector('.artguide-month-heading');
+        if (monthHeading) {
+            monthHeading.style.display = '';
+            const title = monthHeading.querySelector('.artguide-month-heading__title');
+            const subtitle = monthHeading.querySelector('.artguide-month-heading__subtitle');
+            const filtered0 = filterSpecies(speciesData);
+            const checkedTotal = filtered0.filter(s => s.checked).length;
+            if (title) title.textContent = 'Helårsöversikt';
+            if (subtitle) subtitle.textContent = statisticsReady ? `${filtered0.filter(s => !s.personalOnly).length} arter i statistikunderlaget · ${checkedTotal} kryssade` : `Kommunstatistik saknas · ${checkedTotal} personliga kryss`;
+            const descEl = document.getElementById('artguide-description');
+            if (descEl) descEl.style.display = 'none';
+        }
+
+        let filtered = filterSpecies(speciesData);
+        if (currentSort === 'chronological') {
+            filtered = sortChronological(filtered);
+        } else {
+            filtered = sortSpecies(filtered, undefined);
+        }
+
+        container.className = 'artguide-species artguide-species--heatmap';
+
+        let html = '<div class="artguide-heatmap-wrap"><table class="artguide-heatmap">';
+        html += '<thead><tr><th class="artguide-heatmap__name-col">Art</th>';
+        for (let i = 0; i < 12; i++) {
+            const cls = i === currentMonth ? ' class="artguide-heatmap__active-month"' : '';
+            html += `<th${cls}>${MONTH_NAMES[i].substring(0, 3)}</th>`;
+        }
+        html += '<th>Tot</th></tr></thead><tbody>';
+
+        for (const sp of filtered) {
+            const max = Math.max(...sp.months, 1);
+            const checkedMark = sp.checked ? ' ✓' : '';
+            const rowClass = sp.checked ? 'artguide-heatmap__row--checked' : '';
+
+            html += `<tr class="artguide-heatmap__row artguide-heatmap__row--${sp.category} ${rowClass}">`;
+            html += `<td class="artguide-heatmap__name">${escapeHtml(sp.name)}${sp.checked ? ' <span class="artguide-heatmap__checkmark">✓</span>' : ''} <span class="artguide-heatmap__latin">${escapeHtml(sp.latin)}</span></td>`;
+
+            for (let i = 0; i < 12; i++) {
+                const val = sp.months[i];
+                const intensity = val > 0 ? Math.max(0.15, val / max) : 0;
+                const activeClass = i === currentMonth ? ' artguide-heatmap__cell--active' : '';
+                html += `<td class="artguide-heatmap__cell artguide-heatmap__cell--${sp.category}${activeClass}" style="--intensity:${intensity.toFixed(2)}" title="${sp.personalOnly ? 'Statistik saknas' : val + ' obs i ' + MONTH_NAMES[i]}">${sp.personalOnly ? '–' : (val > 0 ? val : '')}</td>`;
+            }
+            html += `<td class="artguide-heatmap__total">${sp.personalOnly ? "–" : sp.total}</td>`;
+            html += '</tr>';
+        }
+
+        html += '</tbody></table></div>';
+        container.innerHTML = html;
+        updateLegendCounts(speciesData, filtered.length);
+    }
+
+    // --- Helpers ---
+    function formatDate(dateStr) {
+        if (typeof dateStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '';
+        const months = ['jan', 'feb', 'mar', 'apr', 'maj', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+        const parts = dateStr.split('-');
+        if (parts.length !== 3) return '';
+        const day = parseInt(parts[2]);
+        const month = months[parseInt(parts[1]) - 1];
+        return `${day} ${month}`;
+    }
+
+    // --- Start ---
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+

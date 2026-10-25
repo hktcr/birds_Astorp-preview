@@ -1,0 +1,815 @@
+/**
+ * arshjul.js - Logic for the dedicated /arshjul/ gallery page
+ * Implements SVG generation, IntersectionObserver for lazy-loading, and a <dialog> modal.
+ */
+
+document.addEventListener("DOMContentLoaded", () => {
+    function publicStatsReady(meta) {
+        return !!meta && meta.dataProviderId === 1 && meta.municipalityId === '1277' &&
+            meta.complete === true && meta.sensitiveObservations === false &&
+            meta.taxonomyPolicy === 'species-rank-only-v1' &&
+            typeof meta.recordsSha256 === 'string' && /^[a-f0-9]{64}$/.test(meta.recordsSha256) &&
+            Number.isSafeInteger(meta.recordCount) && meta.recordCount >= 0 &&
+            /^\d{4}-\d{2}-\d{2}$/.test(meta.fromDay) && /^\d{4}-\d{2}-\d{2}$/.test(meta.toDay) &&
+            meta.fromDay <= meta.toDay && typeof meta.retrievedAt === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(meta.retrievedAt) &&
+            Number.isFinite(Date.parse(meta.retrievedAt)) && Date.parse(meta.retrievedAt) <= Date.now();
+    }
+
+    const dataUrl = "/birds_Astorp-preview/data/species_days_historic.json";
+    const gridEl = document.getElementById("arshjul-grid");
+    const loadingEl = document.getElementById("arshjul-loading");
+
+    // Modal Elements
+    const modal = document.getElementById("arshjul-modal");
+    // Ensure modal is outside any toggled panel (robust against CDN caching)
+    if (modal && modal.closest('#panel-arshjul')) {
+        const artguide = document.querySelector('.artguide');
+        if (artguide) artguide.appendChild(modal);
+    }
+    const modalClose = document.getElementById("arshjul-modal-close");
+    const modalTitle = document.getElementById("arshjul-modal-title");
+    const modalSvgContainer = document.getElementById("arshjul-modal-svg-container");
+    const modalTooltip = document.getElementById("arshjul-modal-tooltip");
+    const modalTooltipDate = document.getElementById("arshjul-modal-tooltip-date");
+    const modalTooltipCount = document.getElementById("arshjul-modal-tooltip-count");
+
+    // Latin name lookup — populated by .then() callback, used by openModal
+    let latinMap = {};
+
+    // Pre-calculate Calendar Data (dynamic leap year detection)
+    const currentYear = new Date().getFullYear();
+    const isLeapYear = true; // Historical wheel must always include 29 February.
+    const daysInMonths = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "Maj", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"];
+    const totalDays = isLeapYear ? 366 : 365;
+    const dayAngles = [];
+    let currentDayOfYear = 0;
+
+    for (let m = 0; m < 12; m++) {
+        for (let d = 1; d <= daysInMonths[m]; d++) {
+            const startAngle = (currentDayOfYear / totalDays) * 360 + 180;
+            const endAngle = ((currentDayOfYear + 1) / totalDays) * 360 + 180;
+            const mm = (m + 1).toString().padStart(2, '0');
+            const dd = d.toString().padStart(2, '0');
+            dayAngles.push({
+                month: m + 1,
+                day: d,
+                key: `${mm}-${dd}`,
+                startAngle: startAngle,
+                endAngle: endAngle
+            });
+            currentDayOfYear++;
+        }
+    }
+
+    function stockholmDay(instant = new Date()) {
+        return new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe/Stockholm',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(instant));
+    }
+
+    function wheelDayIndex(plainDay) {
+        if (typeof plainDay !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(plainDay)) return -1;
+        const stamp = Date.parse(plainDay + 'T00:00:00Z');
+        if (!Number.isFinite(stamp) || new Date(stamp).toISOString().slice(0, 10) !== plainDay) return -1;
+        return dayAngles.findIndex(da => da.key === plainDay.slice(5));
+    }
+
+    // Geometry & Math helpers
+    function polarToCartesian(centerX, centerY, radius, angleInDegrees) {
+        var angleInRadians = (angleInDegrees - 90) * Math.PI / 180.0;
+        return {
+            x: centerX + (radius * Math.cos(angleInRadians)),
+            y: centerY + (radius * Math.sin(angleInRadians))
+        };
+    }
+
+    function describeAnnularSegment(cx, cy, innerR, outerR, startAngle, endAngle) {
+        const p1 = polarToCartesian(cx, cy, outerR, startAngle);
+        const p2 = polarToCartesian(cx, cy, outerR, endAngle);
+        const p3 = polarToCartesian(cx, cy, innerR, endAngle);
+        const p4 = polarToCartesian(cx, cy, innerR, startAngle);
+        const largeArc = endAngle - startAngle > 180 ? 1 : 0;
+        return [
+            "M", p1.x, p1.y,
+            "A", outerR, outerR, 0, largeArc, 1, p2.x, p2.y,
+            "L", p3.x, p3.y,
+            "A", innerR, innerR, 0, largeArc, 0, p4.x, p4.y,
+            "Z"
+        ].join(" ");
+    }
+
+    // Global fixed scale: 1 year = light, GLOBAL_MAX_YEARS+ = full saturation.
+    // This ensures that rare species with 1 obs year don't appear at max intensity.
+    const GLOBAL_MAX_YEARS = 5;
+
+    function getColor(month, count) {
+        if (count === 0) return "none";
+
+        const intensity = Math.min(1, count / GLOBAL_MAX_YEARS);
+
+        if (month >= 3 && month <= 5) {
+            // Spring (Mar-May): Green
+            const hue = 140;
+            const lightness = 85 - (35 * intensity);
+            return `hsl(${hue}, 60%, ${lightness}%)`;
+        } else if (month >= 6 && month <= 8) {
+            // Summer (Jun-Aug): Yellow
+            const hue = 45;
+            const lightness = 85 - (35 * intensity);
+            return `hsl(${hue}, 100%, ${lightness}%)`;
+        } else if (month >= 9 && month <= 11) {
+            // Autumn (Sep-Nov): Orange/Red
+            const hue = 15;
+            const lightness = 85 - (35 * intensity);
+            return `hsl(${hue}, 80%, ${lightness}%)`;
+        } else {
+            // Winter (Dec-Feb): Blue
+            const hue = 210;
+            const lightness = 85 - (35 * intensity);
+            return `hsl(${hue}, 80%, ${lightness}%)`;
+        }
+    }
+
+    /**
+     * Generate an SVG DOM Element
+     * @param {Object} speciesData The data object for the species: {"01-01": 2, ...}
+     * @param {boolean} isInteractive Should hover tooltips be attached? (true for modal, false for grid)
+     * @returns {SVGElement}
+     */
+    function createSVG(speciesData, isInteractive = false, checkDate = null) {
+        const hasHistory = !!speciesData && Object.keys(speciesData).length > 0;
+        speciesData = speciesData || {};
+        const innerRadius = 80;
+        const outerRadius = 100;
+
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "-120 -120 240 240");
+        svg.style.width = "100%";
+        svg.style.height = "100%";
+        svg.style.maxHeight = "100%";
+        svg.style.display = "block";
+        svg.style.overflow = "visible";
+
+        // Background track
+        const bg = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        bg.setAttribute("cx", "0");
+        bg.setAttribute("cy", "0");
+        bg.setAttribute("r", "90");
+        bg.setAttribute("fill", "none");
+        bg.setAttribute("stroke", "#f8fafc");
+        bg.setAttribute("stroke-width", "20");
+        svg.appendChild(bg);
+
+        // Month lines
+        let curDay = 0;
+        for (let m = 0; m < 12; m++) {
+            const monthStartAngle = (curDay / totalDays) * 360 + 180;
+            const divider = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            const p1 = polarToCartesian(0, 0, innerRadius - 5, monthStartAngle);
+            const p2 = polarToCartesian(0, 0, outerRadius + 5, monthStartAngle);
+            divider.setAttribute("x1", p1.x);
+            divider.setAttribute("y1", p1.y);
+            divider.setAttribute("x2", p2.x);
+            divider.setAttribute("y2", p2.y);
+            divider.setAttribute("stroke", "#e2e8f0");
+            divider.setAttribute("stroke-width", "1");
+            svg.appendChild(divider);
+
+            const labelMidAngle = monthStartAngle + ((daysInMonths[m] / totalDays) * 360) / 2;
+            const labelPos = polarToCartesian(0, 0, outerRadius + 15, labelMidAngle);
+            const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            label.setAttribute("x", labelPos.x);
+            label.setAttribute("y", labelPos.y);
+            label.setAttribute("text-anchor", "middle");
+            label.setAttribute("dominant-baseline", "middle");
+            label.setAttribute("font-size", "8");
+            label.setAttribute("fill", "#94a3b8");
+            label.textContent = monthNames[m];
+            svg.appendChild(label);
+
+            curDay += daysInMonths[m];
+        }
+
+        // Calc stats
+        let activeDays = 0;
+        for (const key in speciesData) {
+            if (speciesData[key] > 0) activeDays++;
+        }
+
+        // Central text
+        const textCount = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        textCount.setAttribute("x", "0");
+        textCount.setAttribute("y", "0");
+        textCount.setAttribute("text-anchor", "middle");
+        textCount.setAttribute("dominant-baseline", "middle");
+        textCount.setAttribute("font-size", "24");
+        textCount.setAttribute("font-weight", "bold");
+        textCount.setAttribute("fill", "#334155");
+        textCount.textContent = hasHistory ? activeDays : '–';
+        svg.appendChild(textCount);
+
+        const textLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        textLabel.setAttribute("x", "0");
+        textLabel.setAttribute("y", "20");
+        textLabel.setAttribute("text-anchor", "middle");
+        textLabel.setAttribute("font-size", "10");
+        textLabel.setAttribute("fill", "#64748b");
+        textLabel.textContent = hasHistory ? "Dagar" : "Underlag saknas";
+        svg.appendChild(textLabel);
+
+        // Segments
+        const segmentsGrp = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        svg.appendChild(segmentsGrp);
+
+        dayAngles.forEach(da => {
+            const count = speciesData[da.key] || 0;
+            if (count > 0) {
+                const color = getColor(da.month, count);
+                const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                path.setAttribute("d", describeAnnularSegment(0, 0, innerRadius, outerRadius, da.startAngle - 0.2, da.endAngle + 0.2));
+                path.setAttribute("fill", color);
+
+                if (isInteractive) {
+                    path.style.transition = "fill 0.2s";
+                    path.style.cursor = "crosshair";
+
+                    path.addEventListener("mouseenter", (e) => {
+                        path.setAttribute("fill", "#f87171"); // Hover highlight
+
+                        modalTooltipDate.textContent = `${da.day} ${monthNames[da.month - 1]}`;
+                        modalTooltipCount.textContent = `Observerats under ${count} olika år`;
+
+                        // We use bounding box of the modal container to position absolute tooltip
+                        const containerRect = modalSvgContainer.getBoundingClientRect();
+                        modalTooltip.style.left = `${e.clientX - containerRect.left}px`;
+                        modalTooltip.style.top = `${e.clientY - containerRect.top - 10}px`;
+                        modalTooltip.style.opacity = 1;
+                    });
+
+                    path.addEventListener("mouseleave", () => {
+                        path.setAttribute("fill", color);
+                        modalTooltip.style.opacity = 0;
+                    });
+                }
+
+                segmentsGrp.appendChild(path);
+            }
+        });
+
+        // Today marker — small red tick outside the wheel
+        const todayDOY = wheelDayIndex(stockholmDay());
+        const todayAngle = (todayDOY / totalDays) * 360 + 180;
+        const tickInner = polarToCartesian(0, 0, outerRadius + 3, todayAngle);
+        const tickOuter = polarToCartesian(0, 0, outerRadius + 10, todayAngle);
+        const todayTick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        todayTick.setAttribute("x1", tickInner.x);
+        todayTick.setAttribute("y1", tickInner.y);
+        todayTick.setAttribute("x2", tickOuter.x);
+        todayTick.setAttribute("y2", tickOuter.y);
+        todayTick.setAttribute("stroke", "#dc2626");
+        todayTick.setAttribute("stroke-width", "2");
+        todayTick.setAttribute("stroke-linecap", "round");
+        svg.appendChild(todayTick);
+
+        // Check-date marker — green tick outside the wheel (same radius as today)
+        if (checkDate && wheelDayIndex(checkDate) >= 0) {
+            const checkDOY = wheelDayIndex(checkDate);
+            const checkAngle = (checkDOY / totalDays) * 360 + 180;
+            const checkInner = polarToCartesian(0, 0, outerRadius + 3, checkAngle);
+            const checkOuter = polarToCartesian(0, 0, outerRadius + 10, checkAngle);
+            const checkTick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            checkTick.setAttribute("x1", checkInner.x);
+            checkTick.setAttribute("y1", checkInner.y);
+            checkTick.setAttribute("x2", checkOuter.x);
+            checkTick.setAttribute("y2", checkOuter.y);
+            checkTick.setAttribute("stroke", "#22c55e");
+            checkTick.setAttribute("stroke-width", "2.5");
+            checkTick.setAttribute("stroke-linecap", "round");
+            svg.appendChild(checkTick);
+        }
+
+        return svg;
+    }
+
+    // Modal Map Logic
+    let currentSpeciesForMap = "";
+
+    const mapBtn = document.getElementById("arshjul-modal-map-btn");
+    if (mapBtn) {
+        mapBtn.addEventListener("click", () => {
+            if (typeof openMapLightbox === "function") {
+                openMapLightbox(currentSpeciesForMap);
+            }
+        });
+    }
+
+    // Modal behavior
+    function openModal(speciesName, slug, speciesData, checkDate) {
+        modalTitle.textContent = speciesName;
+        currentSpeciesForMap = speciesName;
+
+        // Show latin name below title
+        let modalLatin = document.getElementById("arshjul-modal-latin");
+        if (!modalLatin) {
+            modalLatin = document.createElement("p");
+            modalLatin.id = "arshjul-modal-latin";
+            modalLatin.style.cssText = "font-style:italic; color:#94a3b8; font-size:1rem; margin:0.15rem 0 0 0;";
+            modalTitle.insertAdjacentElement("afterend", modalLatin);
+        }
+        modalLatin.textContent = latinMap[speciesName] || "";
+
+        // Clear previous SVG
+        const oldSvg = modalSvgContainer.querySelector("svg");
+        if (oldSvg) oldSvg.remove();
+
+        // Hide tooltip just in case
+        modalTooltip.style.opacity = 0;
+
+        // Render interactive SVG (pass checkDate for green tick)
+        const interactiveSvg = createSVG(speciesData, true, checkDate);
+        modalSvgContainer.appendChild(interactiveSvg);
+
+        modal.showModal();
+        document.body.style.overflow = "hidden"; // Prevent background scroll
+    }
+
+    modalClose.addEventListener("click", () => {
+        modal.close();
+    });
+
+    // Click outside to close (backdrop click)
+    modal.addEventListener("click", (e) => {
+        const dialogDimensions = modal.getBoundingClientRect();
+        if (
+            e.clientX < dialogDimensions.left ||
+            e.clientX > dialogDimensions.right ||
+            e.clientY < dialogDimensions.top ||
+            e.clientY > dialogDimensions.bottom
+        ) {
+            modal.close();
+        }
+    });
+
+    modal.addEventListener("close", () => {
+        document.body.style.overflow = "";
+    });
+
+    // Fetch master JSON and category/checklist data, then init grid
+    const guideUrl = "/birds_Astorp-preview/data/species-guide.json";
+    const checklistUrl = "/birds_Astorp-preview/data/checklist-2026.json";
+
+    Promise.all([
+        fetch(dataUrl).then(r => r.json()),
+        fetch(guideUrl).then(r => r.json()).catch(() => null),
+        fetch(checklistUrl).then(r => r.json()).catch(() => null)
+    ])
+        .then(([data, guideData, checklistData]) => {
+            if (!publicStatsReady(data._meta) || !guideData || !publicStatsReady(guideData.provenance) ||
+                guideData.provenance.recordsSha256 !== data._meta.recordsSha256) {
+                throw new Error('Årshjulets äldre underlag behöver källkontrolleras.');
+            }
+            window._arshjulData = data;
+            if (loadingEl) loadingEl.remove();
+
+            // Build category + latin lookup from species-guide.json
+            const categoryMap = {};
+            if (guideData && guideData.species) {
+                guideData.species.forEach(sp => {
+                    categoryMap[sp.name] = sp.category || "regular";
+                    if (sp.latin) latinMap[sp.name] = sp.latin;
+                });
+            }
+
+            // Build checklist lookup (species → earliest date + latin)
+            const checkedMap = new Map();
+            if (checklistData && checklistData.observations) {
+                checklistData.observations.forEach(entry => {
+                    if (entry.species) {
+                        const existing = checkedMap.get(entry.species);
+                        if (!existing || entry.date < existing.date) {
+                            checkedMap.set(entry.species, { date: entry.date, latin: entry.latin || "" });
+                        }
+                    }
+                });
+            }
+
+            // Add checklist species NOT in species-guide to categoryMap + latinMap
+            // so they appear in the årshjul grid even without historical data
+            for (const [species, info] of checkedMap) {
+                if (!(species in categoryMap)) {
+                    categoryMap[species] = "new";
+                    if (info.latin) latinMap[species] = info.latin;
+                }
+            }
+
+            // Taxonomic sorting using the index passed from Hugo
+            const taxaIndex = {};
+            if (window.arshjulTaxonomy) {
+                window.arshjulTaxonomy.forEach((name, i) => {
+                    taxaIndex[name] = i;
+                });
+            }
+
+            // Include species from historic data that are in the guide OR new from checklist
+            // (skip _meta key which is metadata, not a species)
+            const speciesFromData = Object.keys(data).filter(name => name !== '_meta' && name in categoryMap);
+            // Also include checklist species that have no historic data at all
+            const checklistOnly = [...checkedMap.keys()].filter(name => !(name in data) && name in categoryMap);
+            const allSpecies = [...new Set([...speciesFromData, ...checklistOnly])]
+                .sort((a, b) => {
+                    const idxA = taxaIndex[a] ?? 99999;
+                    const idxB = taxaIndex[b] ?? 99999;
+                    if (idxA !== idxB) return idxA - idxB;
+                    return a.localeCompare(b);
+                });
+
+            // Intersection Observer for Lazy Loading
+            // Render when Card is within 200px of Viewport
+            let observer = null;
+            if (gridEl) {
+                observer = new IntersectionObserver((entries, obs) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            const card = entry.target;
+                            const speciesName = card.dataset.species;
+                            const svgWrapper = card.querySelector('.arshjul-card-svg-wrapper');
+
+                            if (!svgWrapper.hasChildNodes()) {
+                                // First time rendering! Use empty data if species has no historic records
+                                const cardCheckDate = card.dataset.checkdate || null;
+                                const svg = createSVG(data[speciesName], false, cardCheckDate);
+                                svgWrapper.appendChild(svg);
+
+                                // Let layout settle, then fade in
+                                requestAnimationFrame(() => {
+                                    svgWrapper.classList.add('loaded');
+                                });
+                            }
+
+                            // We don't unobserve, because we might want to unmount SVGs if we ever run 
+                            // out of memory on huge datasets, but for ~100 SVGs it's fine.
+                            // obs.unobserve(card); 
+                        }
+                    });
+                }, { rootMargin: "200px 0px" });
+            }
+
+            allSpecies.forEach(species => {
+                const slug = species.toLowerCase().replace(/å/g, "a").replace(/ä/g, "a").replace(/ö/g, "o").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+                const category = categoryMap[species] || "regular";
+                const isChecked = checkedMap.has(species);
+                const checkInfo = checkedMap.get(species) || null;
+                const checkDate = checkInfo ? checkInfo.date : null;
+
+                const card = document.createElement("div");
+                card.className = "arshjul-card";
+                card.dataset.species = species;
+                card.dataset.category = category;
+                card.dataset.checked = isChecked ? "true" : "false";
+
+                // Store check date on card for lazy SVG rendering
+                if (isChecked && checkDate) {
+                    card.dataset.checkdate = checkDate;
+                }
+
+                // ── Checked badge (green circle with ✓) ──
+                if (isChecked) {
+                    const badge = document.createElement("div");
+                    badge.className = "arshjul-card-badge";
+                    badge.title = checkDate ? `Kryssad ${checkDate}` : 'Kryssad 2026';
+                    badge.innerHTML = `<svg width="22" height="22" viewBox="0 0 22 22">
+                        <circle cx="11" cy="11" r="10" fill="#22c55e"/>
+                        <path d="M6.5 11.5 L9.5 14.5 L15.5 8" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                    </svg>`;
+                    card.appendChild(badge);
+                }
+
+                const header = document.createElement("h3");
+                header.textContent = species;
+                card.appendChild(header);
+
+                // Latin name below species name
+                if (latinMap[species]) {
+                    const latin = document.createElement("p");
+                    latin.textContent = latinMap[species];
+                    latin.style.cssText = "font-style:italic; color:#94a3b8; font-size:0.75rem; margin:0 0 0.25rem 0; line-height:1;";
+                    card.appendChild(latin);
+                }
+
+                const svgWrapper = document.createElement("div");
+                svgWrapper.className = "arshjul-card-svg-wrapper";
+                card.appendChild(svgWrapper);
+
+                // Add click listener for Modal — use empty data if species has no historic records
+                const speciesData = data[species];
+                card.addEventListener("click", () => {
+                    openModal(species, slug, speciesData, card.dataset.checkdate || null);
+                });
+
+                if (gridEl) {
+                    gridEl.appendChild(card);
+                    // Start observing
+                    if (observer) observer.observe(card);
+                }
+            });
+
+            // ── FILTER LOGIC ──
+            const filterContainer = document.getElementById("arshjul-filters");
+            const filterBtns = filterContainer ? filterContainer.querySelectorAll(".arshjul-filter-btn") : [];
+            const searchInput = document.getElementById("arshjul-search");
+
+            function updateGrid() {
+                // Determine active category filter
+                let activeFilter = "alla";
+                const activeBtn = Array.from(filterBtns).find(b => b.classList.contains("arshjul-filter-btn--active"));
+                if (activeBtn) activeFilter = activeBtn.dataset.filter;
+
+                // Determine active text search
+                const query = searchInput ? searchInput.value.toLowerCase().trim() : "";
+
+                const cards = gridEl.querySelectorAll(".arshjul-card");
+                cards.forEach(card => {
+                    const species = card.dataset.species.toLowerCase();
+                    let showCategory = false;
+
+                    // Match category
+                    if (activeFilter === "alla") {
+                        showCategory = true;
+                    } else if (activeFilter === "checked") {
+                        showCategory = card.dataset.checked === "true";
+                    } else if (activeFilter === "missing") {
+                        showCategory = card.dataset.checked === "false";
+                    } else {
+                        showCategory = card.dataset.category === activeFilter;
+                    }
+
+                    // Match search text
+                    const showSearch = query === "" || species.includes(query);
+
+                    card.style.display = (showCategory && showSearch) ? "" : "none";
+                });
+            }
+
+            if (filterBtns.length > 0) {
+                filterBtns.forEach(btn => {
+                    btn.addEventListener("click", () => {
+                        // Update active state visually
+                        filterBtns.forEach(b => {
+                            b.classList.remove("arshjul-filter-btn--active");
+                            b.style.background = "white";
+                            b.style.color = "#374151";
+                        });
+                        btn.classList.add("arshjul-filter-btn--active");
+                        btn.style.background = "#2d5016";
+                        btn.style.color = "white";
+
+                        // Apply filters
+                        updateGrid();
+                    });
+                });
+            }
+
+            // ── TIPS & AKTUELLT PANEL (inline årshjul) ──
+            const RECOMMENDATION_MIN_YEARS = 2;
+            const RECOMMENDATION_RARE_MAX_TOTAL = 5;
+
+            function renderTipsPanel() {
+                const panelTips = document.getElementById("panel-tips");
+                if (!panelTips) return;
+
+                const showAll = document.getElementById("tips-show-all")?.checked || false;
+
+                const today = stockholmDay();
+                const todayDOY = wheelDayIndex(today);
+
+                const possibleNow = [];
+                const arrivingSoon = [];
+                const rarities = [];
+                const leavingSoon = [];
+                const inTheArea = [];
+                let hiddenCheckedCount = 0;
+
+                for (const species in data) {
+                    if (species === '_meta' || !categoryMap[species]) continue;
+
+                    const isChecked2026 = checkedMap.has(species);
+                    const obsData = data[species];
+                    let totalDaysCount = 0;
+                    let sumNow = 0;
+                    let sumSoon = 0;
+                    let soonOffset = 999;
+
+                    let winterDays = 0;
+                    let summerDays = 0;
+                    let deepWinterDays = 0; // dec + jan + feb
+                    const activeMonthsSet = new Set();
+
+                    for (let i = 0; i < dayAngles.length; i++) {
+                        const count = obsData[dayAngles[i].key] || 0;
+                        if (count > 0) {
+                            totalDaysCount++;
+
+                            const month = dayAngles[i].month;
+                            activeMonthsSet.add(month);
+                            if (month >= 4 && month <= 9) {
+                                summerDays++;
+                            } else {
+                                winterDays++;
+                            }
+                            if (month === 12 || month === 1 || month === 2) {
+                                deepWinterDays++;
+                            }
+
+                            let diff = i - todayDOY;
+                            if (diff < -183) diff += 366;
+                            if (diff > 183) diff -= 366;
+
+                            if (diff >= -7 && diff <= 7) {
+                                sumNow++;
+                            } else if (diff >= 8 && diff <= 21) {
+                                sumSoon++;
+                                if (diff < soonOffset) soonOffset = diff;
+                            }
+                        }
+                    }
+
+                    if (totalDaysCount === 0) continue;
+
+                    const activeMonths = activeMonthsSet.size;
+                    const isResident = deepWinterDays >= 4 ||
+                        (deepWinterDays >= 2 && deepWinterDays / totalDaysCount >= 0.10);
+                    let isWinterGuest = false;
+                    if (totalDaysCount >= 5 && winterDays / totalDaysCount > 0.75) {
+                        isWinterGuest = true;
+                    }
+                    let isSummerGuest = false;
+                    if (totalDaysCount >= 5 && summerDays / totalDaysCount > 0.75) {
+                        isSummerGuest = true;
+                    }
+
+                    // Kategorisera alla arter, men markera om kryssade
+                    let categorized = false;
+                    if (totalDaysCount <= RECOMMENDATION_RARE_MAX_TOTAL) {
+                        if (sumNow > 0) {
+                            rarities.push({ name: species, checked: isChecked2026 });
+                            categorized = true;
+                        }
+                    } else {
+                        const currentMonth = Number(today.slice(5, 7));
+                        if (sumNow >= RECOMMENDATION_MIN_YEARS) {
+                            if (isWinterGuest && currentMonth >= 2 && currentMonth <= 5) {
+                                leavingSoon.push({ name: species, checked: isChecked2026 });
+                            } else if (isSummerGuest && currentMonth >= 8 && currentMonth <= 10) {
+                                leavingSoon.push({ name: species, checked: isChecked2026 });
+                            } else {
+                                possibleNow.push({ name: species, checked: isChecked2026 });
+                            }
+                            categorized = true;
+                        } else if (sumSoon >= RECOMMENDATION_MIN_YEARS) {
+                            if (isWinterGuest && currentMonth >= 2 && currentMonth <= 5) {
+                                leavingSoon.push({ name: species, checked: isChecked2026 });
+                            } else if (isSummerGuest && currentMonth >= 8 && currentMonth <= 10) {
+                                leavingSoon.push({ name: species, checked: isChecked2026 });
+                            } else if (isResident) {
+                                inTheArea.push({ name: species, activeMonths, totalDaysCount, checked: isChecked2026 });
+                            } else {
+                                arrivingSoon.push({ name: species, offset: soonOffset, checked: isChecked2026 });
+                            }
+                            categorized = true;
+                        }
+
+                        // Stannare som inte fångades av någon kategori alls
+                        // (exkludera vinter/sommargäster — de är inte stannare)
+                        if (!categorized && isResident && !isWinterGuest && !isSummerGuest && totalDaysCount >= 10) {
+                            inTheArea.push({ name: species, activeMonths, totalDaysCount, checked: isChecked2026 });
+                        }
+                    }
+                }
+
+                arrivingSoon.sort((a, b) => a.offset - b.offset);
+                inTheArea.sort((a, b) => b.activeMonths - a.activeMonths || b.totalDaysCount - a.totalDaysCount);
+
+                // Count hidden checked species across all categories
+                [possibleNow, arrivingSoon, leavingSoon, inTheArea, rarities].forEach(list => {
+                    list.forEach(item => { if (item.checked) hiddenCheckedCount++; });
+                });
+
+                // Update badge
+                const countBadge = document.getElementById("tips-checked-count");
+                if (countBadge) {
+                    countBadge.textContent = hiddenCheckedCount > 0 && !showAll
+                        ? `(${hiddenCheckedCount} kryssade döljs)`
+                        : "";
+                }
+
+                // Helper: render årshjul cards into a section
+                function renderSection(sectionId, speciesList) {
+                    const section = document.getElementById(sectionId);
+                    if (!section) return;
+                    const grid = section.querySelector('.tips-grid');
+                    const emptyMsg = section.querySelector('.tips-empty');
+                    if (!grid) return;
+                    grid.innerHTML = '';
+
+                    // Filter based on showAll
+                    const filtered = showAll
+                        ? speciesList
+                        : speciesList.filter(item => !item.checked);
+
+                    const names = filtered.map(item => typeof item === 'string' ? item : item.name);
+
+                    if (names.length === 0) {
+                        grid.style.display = 'none';
+                        if (emptyMsg) emptyMsg.style.display = 'block';
+                        return;
+                    }
+
+                    grid.style.display = 'grid';
+                    if (emptyMsg) emptyMsg.style.display = 'none';
+
+                    names.forEach(species => {
+                        const checkInfo = checkedMap.get(species) || null;
+                        const checkDate = checkInfo ? checkInfo.date : null;
+                        const isChecked = checkedMap.has(species);
+
+                        const card = document.createElement("div");
+                        card.className = "arshjul-card";
+                        card.style.cssText = "padding: 1rem;" + (isChecked ? " opacity: 0.6; border-color: #86efac;" : "");
+
+                        const header = document.createElement("h3");
+                        header.textContent = (isChecked ? "✓ " : "") + species;
+                        header.style.cssText = "margin: 0 0 0.5rem 0; font-size: 1rem;" + (isChecked ? " color: #16a34a;" : "");
+                        card.appendChild(header);
+
+                        if (latinMap[species]) {
+                            const latin = document.createElement("p");
+                            latin.textContent = latinMap[species];
+                            latin.style.cssText = "font-style:italic; color:#94a3b8; font-size:0.7rem; margin:0 0 0.25rem 0; line-height:1;";
+                            card.appendChild(latin);
+                        }
+
+                        const svgWrapper = document.createElement("div");
+                        svgWrapper.className = "arshjul-card-svg-wrapper loaded";
+                        const svg = createSVG(data[species], false, checkDate);
+                        svgWrapper.appendChild(svg);
+                        card.appendChild(svgWrapper);
+
+                        card.addEventListener("click", () => {
+                            const slug = species.toLowerCase().replace(/å/g, "a").replace(/ä/g, "a").replace(/ö/g, "o").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+                            openModal(species, slug, data[species], checkDate);
+                        });
+
+                        grid.appendChild(card);
+                    });
+                }
+
+                renderSection("tips-possible", possibleNow);
+                renderSection("tips-arriving", arrivingSoon);
+                renderSection("tips-leaving", leavingSoon);
+                renderSection("tips-inarea", inTheArea.slice(0, showAll ? 12 : 6));
+                renderSection("tips-rarities", rarities);
+            }
+
+            // Render tips panel on first toggle open (lazy)
+            // Listen for panel-tips becoming visible
+            const tipsPanelEl = document.getElementById("panel-tips");
+            if (tipsPanelEl) {
+                const tipsObserver = new MutationObserver(() => {
+                    if (tipsPanelEl.style.display !== "none") {
+                        renderTipsPanel();
+                    }
+                });
+                tipsObserver.observe(tipsPanelEl, { attributes: true, attributeFilter: ["style"] });
+            }
+
+            // Toggle: visa/dölj kryssade arter
+            const showAllCheckbox = document.getElementById("tips-show-all");
+            if (showAllCheckbox) {
+                showAllCheckbox.addEventListener("change", () => renderTipsPanel());
+            }
+
+            // Search input — simple filtering only (no dropdown)
+            if (searchInput) {
+                searchInput.addEventListener("input", () => {
+                    updateGrid();
+                });
+            }
+
+        })
+        .catch(e => {
+            console.error(e);
+            if (loadingEl) loadingEl.textContent = "Kunde inte ladda data.";
+        });
+
+    // Expose openModal to global scope for artguide.js and aktuellt.js
+    window.openArshjulModalForSpecies = function (speciesName, checkDate) {
+        if (window._arshjulData && window._arshjulData[speciesName]) {
+            // We recreate slug logic here
+            const slug = speciesName.toLowerCase().replace(/å/g, "a").replace(/ä/g, "a").replace(/ö/g, "o").replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+            openModal(speciesName, slug, window._arshjulData[speciesName], checkDate);
+        } else {
+            console.warn("No data for species", speciesName);
+        }
+    };
+
+});
+
