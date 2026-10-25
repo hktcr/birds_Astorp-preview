@@ -365,7 +365,9 @@ document.addEventListener("DOMContentLoaded", () => {
         .then(([data, guideData, checklistData]) => {
             if (!publicStatsReady(data._meta) || !guideData || !publicStatsReady(guideData.provenance) ||
                 guideData.provenance.recordsSha256 !== data._meta.recordsSha256) {
-                throw new Error('Årshjulets äldre underlag behöver källkontrolleras.');
+                const unavailable = new Error('Årshjulets äldre underlag behöver källkontrolleras.');
+                unavailable.code = 'UNVERIFIED_PUBLIC_HISTORY';
+                throw unavailable;
             }
             window._arshjulData = data;
             if (loadingEl) loadingEl.remove();
@@ -797,7 +799,18 @@ document.addEventListener("DOMContentLoaded", () => {
         })
         .catch(e => {
             console.error(e);
-            if (loadingEl) loadingEl.textContent = "Kunde inte ladda data.";
+            if (loadingEl) {
+                loadingEl.setAttribute('role', 'status');
+                loadingEl.style.color = '#334155';
+                loadingEl.textContent = e.code === 'UNVERIFIED_PUBLIC_HISTORY'
+                    ? 'Underlag saknas – årshjulets historiska kommundata är inte källkontrollerade. Årshjul och historiska rekommendationer visas därför inte i förhandsvisningen. Den personliga årslistan ovan är ett separat underlag; saknat kommununderlag är inte noll fynd.'
+                    : 'Underlaget kunde inte läsas. Inga historiska antal eller rekommendationer visas; saknat underlag är inte noll fynd.';
+            }
+            // Do not leave apparently usable historical controls after a failed source gate.
+            document.querySelectorAll('#arshjul-filters, #arshjul-search-container, #btn-toggle-tips, #btn-toggle-kalender, #panel-tips, #panel-kalender').forEach(el => {
+                el.hidden = true;
+                el.style.display = 'none';
+            });
         });
 
     // Expose openModal to global scope for artguide.js and aktuellt.js

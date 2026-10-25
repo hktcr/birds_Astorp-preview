@@ -179,6 +179,8 @@ document.addEventListener('DOMContentLoaded',()=>{
   const wasGrid=gridMode;settle();paused=true;const run=token;
   if(!wasGrid){if(!board.length)fillGrid();if(!(await Promise.all(board.map(g=>readyGroup(g,true)))).every(Boolean)){if(run===token)error('En hel grupp i ljusbordet kunde inte laddas. Storbilden ligger kvar.');return;}if(run!==token)return;gridState(true);root.dataset.phase='manual-grid';status.textContent='Ljusbord · '+board.reduce((n,g)=>n+g.images.length,0)+' bilder. Välj en hel notisgrupp.';}
   controls();
+  // The clicked large-image button becomes inert in grid mode; keep keyboard events inside the lighttable.
+  options.focus({preventScroll:true});
  }
  function navigate(delta){
   paused=true;settle();
