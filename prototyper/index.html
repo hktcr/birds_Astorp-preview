@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Innehåll och granskningsstatus för Åstorps fåglars separata arbetsversion.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Åstorps fåglar · prototyper</title>
+  <link rel="icon" href="../favicon.ico">
+  <style>
+    :root { color-scheme: light; --ink: #263c28; --muted: #586554; --paper: #f5f6ef; --line: #d8e0d2; --green: #365a2b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.65; }
+    main { width: min(100% - 2.5rem, 1040px); margin: 0 auto; padding: clamp(2rem, 5vw, 4.5rem) 0 3rem; }
+    .eyebrow { margin: 0 0 .75rem; color: var(--green); font-size: .76rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    h1, h2 { font-family: Georgia, "Times New Roman", serif; font-weight: 400; line-height: 1.2; }
+    h1 { font-size: clamp(2.25rem, 6vw, 3.8rem); margin: 0 0 1rem; }
+    .intro { font-size: 1.1rem; max-width: 65ch; margin: 0 0 1.25rem; }
+    .access { max-width: 75ch; color: var(--muted); margin: 0 0 2rem; }
+    .pages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 0; padding: 0; list-style: none; }
+    .pages li { background: #fff; border: 1px solid var(--line); border-radius: .75rem; padding: clamp(1.25rem, 3vw, 1.75rem); }
+    h2 { margin: .7rem 0 .8rem; font-size: 1.65rem; }
+    a { color: var(--green); text-underline-offset: .18em; text-decoration-thickness: 1px; }
+    h2 a { display: inline-block; min-height: 44px; padding: .1rem 0; }
+    a:hover { color: #152d11; }
+    a:focus-visible { outline: 3px solid #a57a19; outline-offset: 5px; border-radius: 2px; }
+    .status { display: inline-block; margin: 0; padding: .2rem .65rem; border-radius: 1rem; background: #edf2e7; color: #3a5131; font-size: .75rem; font-weight: 650; }
+    .status.pending { background: #f2eee4; color: #6a5835; }
+    .pages p:not(.status) { margin: .65rem 0 0; }
+    .limit { color: var(--muted); font-size: .9rem; }
+    footer { margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .86rem; }
+    footer p { margin: .4rem 0; max-width: 85ch; }
+    @media (max-width: 650px) { .pages { grid-template-columns: 1fr; } main { width: min(100% - 2rem, 1040px); } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Åstorps fåglar · arbetsversion</p>
+      <h1>Prototyperna samlade</h1>
+      <p class="intro">Här kan du öppna de nya och omarbetade sidorna, prova det som är byggt och se vad som fortfarande saknas.</p>
+      <p class="access">Det här är en separat, <strong>offentlig förhandsvisning</strong>. Den ersätter inte astorpsfaglar.se och länkas inte från den ordinarie webbplatsen. Den som har eller hittar adressen kan öppna den. Sidornas <code>noindex</code> är inte ett åtkomstskydd.</p>
+    </header>
+
+    <ul class="pages" aria-label="Sidor att granska">
+      <li>
+        <p class="status">Byggd vy · kommununderlag saknas</p>
+        <h2><a href="../">Kommunöversikten</a></h2>
+        <p>Den nya startsidan skiljer kommunens samlade fågelår från det personliga projektet. Prova datumvalet för jämförelse mellan 2024, 2025 och 2026 och följ ingångarna till de olika delarna.</p>
+        <p class="limit">Datumvalet ändrar jämförelseperioden, inte några färdiga jämförelsetal. Kommunens artantal visas som ”Underlag saknas”.</p>
+      </li>
+      <li>
+        <p class="status">Byggd vy · personlig lista</p>
+        <h2><a href="../mitt-fagelar-2026/">Mitt fågelår 2026</a></h2>
+        <p>Det personliga fågelåret har fått en egen sida med årslista, observationsspår och notiser. Det bevarade underlaget innehåller 148 arter; 150 är en personlig milstolpe, inte kommunens mål.</p>
+        <p class="limit">Ingen ny observationshämtning är gjord. Exakta positioner är utelämnade i denna förhandsvisning och kartlänken visar ett besked om det.</p>
+      </li>
+      <li>
+        <p class="status pending">Platshållare · ingen personjämförelse</p>
+        <h2><a href="../kommun/">Rapportörer och observatörer</a></h2>
+        <p>En förklaringssida för den tänkta jämförelsen av kommunens fågelrapportering. Den skiljer den som har observerat en fågel från den som har registrerat rapporten.</p>
+        <p class="limit">Inga namn, personantal eller placeringar visas. Villkor, identitet och integritetsfrågor behöver klarläggas först.</p>
+      </li>
+      <li>
+        <p class="status pending">Omarbetad vy · historiken pausad</p>
+        <h2><a href="../artguide/">Artguide och årshjul</a></h2>
+        <p>Här skiljs personliga kryss från kommunens historiska observationer. Den nya hanteringen visar ett tydligt besked när ett källkontrollerat historiskt underlag saknas.</p>
+        <p class="limit">Årshjul, månadsguide och historiska rekommendationer går därför inte att prova fullt ut. Saknade data visas inte som noll fynd.</p>
+      </li>
+      <li>
+        <p class="status">Byggd vy · artkatalog och notiser</p>
+        <h2><a href="../species/">Fågelatlasen</a></h2>
+        <p>Bläddra bland arterna och öppna deras sidor med bevarade bilder och notiser. Personliga kryssmarkeringar hålls åtskilda från kommunens rapportstatistik.</p>
+        <p class="limit">Äldre artnamn och personliga kryss är inte en ny, verifierad kommunräkning. Historiska antal och fyndkartor inväntar källkontroll.</p>
+      </li>
+      <li>
+        <p class="status pending">Byggt gränssnitt · liveunderlag saknas</p>
+        <h2><a href="../faltpulsen/">Fältpulsen</a></h2>
+        <p>Vyn för aktuella observationer har valen tre dagar, vecka och månad. Prova periodvalet och hur sidan förklarar att aktuellt, källkontrollerat underlag saknas.</p>
+        <p class="limit">Ingen ny livehämtning görs. Rapportörsuppgifter och observationspositioner ingår inte i denna förhandsvisning.</p>
+      </li>
+    </ul>
+
+    <footer>
+      <p><strong>Arbetsversion, inte färdig webbplats.</strong> Några desktopflöden har provats. Fullständig mobil-, tillgänglighets- och datagranskning återstår.</p>
+      <p>Förhandsvisningen använder mindre bildkopior. Vissa video- och ljudfiler samt exakta observations- och bildpositioner är utelämnade; originalen är bevarade.</p>
+      <p>Innehållsförteckningen utgår från den publicerade R6-versionen den 25 oktober 2026. Sammanställd <time datetime="2026-10-26">26 oktober 2026</time>.</p>
+    </footer>
+  </main>
+</body>
+</html>
