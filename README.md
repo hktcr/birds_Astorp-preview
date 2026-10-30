@@ -16,8 +16,7 @@ The static public snapshot is a dated fallback. municipal-preview-live.js now fe
 Public source: SLU SOS WFS / Artportalen. Exact Åstorp municipality, birds, positive
 observations, 2025 and 2026 to 29 October. All three count checks agree per year;
 this does not imply an atomic database snapshot. Protected records are unavailable.
-Person statistics and all-time municipal firsts remain blocked by missing identity
-and historical coverage. Taxonomy follows AviList v2026 (20 October 2026), with the existing feral-pigeon inclusion within Columba livia. Artfakta identifiers are retained only as source identifiers. See the visible scope notice for remaining limitations.
+Observer lists are now linked directly from Artportalen, not recreated from name strings. All-time municipal firsts remain unverified. Taxonomy follows AviList v2026 (20 October 2026), with the existing feral-pigeon inclusion within Columba livia. Artfakta identifiers are retained only as source identifiers. See the visible scope notice for remaining limitations.
 
 ## API and visual revision, 29 October evening
 
@@ -32,3 +31,9 @@ Only public positive, naturally occurring, non-uncertain bird records in the exa
 municipality Åstorp are queried. No geometry or person fields are requested for statistics. The separate on-demand credits request fetches only the public reportedBy/recordedBy strings for exact already-public sighting IDs, displaying their distinct source roles without identity merging. Names are not written to the repository or session cache.
 Reporter ranking remains blocked: public strings are not stable identities.
 Historical absence is not proof of real-world absence or a first-ever municipal record.
+
+## Artportalen links, 30 October 2026
+
+The municipal links page `/kommun/` now links directly to Artportalen’s observer league (2026 and Total), municipal species list and year comparison for birds in Åstorp. It has no scripts, name aggregation, internal endpoint calls or mirrored name lists. The municipal year and first-date views keep their independently defined AviList-based public WFS data. Counts may differ from Artportalen’s own list rules. Logged-out public access and URL filter persistence were verified 2026-10-30; future service changes are not guaranteed.
+
+The earlier local P71 exact-name ranking commit is not part of this branch or publication. Production and the personal bird-year page are unchanged.

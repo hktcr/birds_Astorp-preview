@@ -24,3 +24,11 @@ Basrevision: 502e9cdeb875e67494d5ad21324ebd1bbe8633f3.
 Kör alla fem tester med `for f in scripts/test-municipal*.cjs; do node "$f" || exit; done`.
 Feltester ersätter inte faktisk källkontroll. Godkänd teknisk funktion betyder inte
 fullständig biologisk inventering eller verifierad personidentitet.
+
+## 30 oktober: förenklad Artportalen-ingång
+
+Ny gren från remote 753ec064, inte från den lokala P71-namnrankingen. Fyra direkta offentliga länkar ersätter den blockerade rapportörsvyn. Kommunårsdata/förstafynd behålls. Länksidan är scriptfri; ingen namninsamling, internendpoint eller proxy.
+
+Samtliga fem befintliga municipaltestskript samt test-artportalen-links.cjs passerar. Den nya kontrollen verifierar exakta kommun-/taxongrupp-/periodlänkar, skillnad observatör/rapportör och att länksidan inte laddar skript eller rankingtabell. Oberoende granskare har kontrollerat diff och alla fyra länkar med HTTP200 och rätt rubriker. Utloggad webbläsarkontroll gjordes samma morgon för källans listor. Det är inte en visuell kontroll av den nya lokala layouten.
+
+Visuell desktop-/mobilkontroll av den nya layouten återstår före slutligt verifierad leverans; den lokala browserstarten var tidigare blockerad av miljön. Produktion och personlig fågelårssida är oförändrade.
